@@ -27,20 +27,26 @@ enum LSoftmaxResource {kTempSpace};
 
 struct LSoftmaxParam : public dmlc::Parameter<LSoftmaxParam> {
   int margin;
-  float beta;
+  int beta_iter;
+  float beta_base;
   float beta_min;
-  float scale;
+  float beta_gamma;
+  float beta_power;
   int num_hidden;
   bool verbose;
   DMLC_DECLARE_PARAMETER(LSoftmaxParam) {
-    DMLC_DECLARE_FIELD(margin).set_default(2).set_lower_bound(1)
+    DMLC_DECLARE_FIELD(margin).set_default(4).set_lower_bound(1)
     .describe("LSoftmax margin");
-    DMLC_DECLARE_FIELD(beta).set_default(1).set_lower_bound(0)
-    .describe("LSoftmax beta, same as lambda to weight original value");
-    DMLC_DECLARE_FIELD(beta_min).set_default(0).set_lower_bound(0)
-    .describe("Minimum beta");
-    DMLC_DECLARE_FIELD(scale).set_default(1).set_range(0, 1)
-    .describe("Scale of beta during training for every iteration");
+	DMLC_DECLARE_FIELD(beta_iter).set_default(0)
+	.describe("beta_iter, default=0");
+    DMLC_DECLARE_FIELD(beta_base).set_default(1000).set_lower_bound(0)
+    .describe("beta_base, default=1000");
+    DMLC_DECLARE_FIELD(beta_min).set_default(5).set_lower_bound(0)
+    .describe("Minimum beta default=5");
+	DMLC_DECLARE_FIELD(beta_gamma).set_default(0.06).set_range(0, 1)
+	.describe("beta_gamma default=0.06");
+	DMLC_DECLARE_FIELD(beta_power).set_default(-1)
+	.describe("beta_power default=-1");
     DMLC_DECLARE_FIELD(num_hidden).set_lower_bound(1)
     .describe("Number of hidden nodes of the output");
     DMLC_DECLARE_FIELD(verbose).set_default(false)
@@ -66,7 +72,9 @@ class LSoftmaxOp : public Operator {
       k_table_.push_back(std::cos(i * pi / margin));
       c_table_.push_back(factor);
     }
-    next_beta_ = param.beta * 0.1f;
+    next_beta_ = param.beta_base * 0.1f;
+	beta_iter_ = param.beta_iter;
+	beta_ = 0;
   }
 
   virtual void Forward(const OpContext &ctx,
@@ -84,6 +92,7 @@ class LSoftmaxOp : public Operator {
           req[lsoftmax_enum::kDataNorm] == kWriteTo);
     CHECK(req[lsoftmax_enum::kWeightNorm] == kNullOp ||
           req[lsoftmax_enum::kWeightNorm] == kWriteTo);
+
     Stream<xpu> *s = ctx.get_stream<xpu>();
     const int n = in_data[lsoftmax_enum::kData].size(0);
     const int m = in_data[lsoftmax_enum::kWeight].size(0);
@@ -100,9 +109,19 @@ class LSoftmaxOp : public Operator {
     // original fully connected
     out = dot(x, w.T());
     if (ctx.is_train) {
+	  const int margin = param_.margin;
+	  // dirty hack, should also work for multi device
+	  beta_iter_ += 1;
+	  beta_ = param_.beta_base * pow(1.0f + param_.beta_gamma * beta_iter_, param_.beta_power);
+	  beta_ = std::max(beta_, param_.beta_min);
+	  if (beta_ < next_beta_) {
+		  next_beta_ *= 0.1f;
+		  if (param_.verbose) {
+			  LOG(INFO) << "LSoftmax changes beta to " << beta_;
+		  }
+	  }
+	  const DType beta = static_cast<DType>(beta_);
       // large margin fully connected
-      const int margin = param_.margin;
-      const DType beta = static_cast<DType>(param_.beta);
       Tensor<cpu, 1, DType> k_table_cpu(k_table_.data(), Shape1(k_table_.size()));
       Tensor<cpu, 1, DType> c_table_cpu(c_table_.data(), Shape1(c_table_.size()));
       Tensor<xpu, 1, DType> k_table_xpu(Shape1(k_table_.size()));
@@ -157,7 +176,7 @@ class LSoftmaxOp : public Operator {
     w_grad = dot(o_grad.T(), x);
     // large margin fully connected
     const int margin = param_.margin;
-    const DType beta = static_cast<DType>(param_.beta);
+	const DType beta = static_cast<DType>(beta_);
     Tensor<cpu, 1, DType> k_table_cpu(k_table_.data(), Shape1(k_table_.size()));
     Tensor<cpu, 1, DType> c_table_cpu(c_table_.data(), Shape1(c_table_.size()));
     Tensor<xpu, 1, DType> k_table_xpu(Shape1(k_table_.size()));
@@ -172,15 +191,6 @@ class LSoftmaxOp : public Operator {
                      k_table_xpu, c_table_xpu, margin, beta);
     FreeSpace(&k_table_xpu);
     FreeSpace(&c_table_xpu);
-    // dirty hack, should also work for multi device
-    param_.beta *= param_.scale;
-    param_.beta = std::max(param_.beta, param_.beta_min);
-    if (param_.beta < next_beta_) {
-      next_beta_ *= 0.1f;
-      if (param_.verbose) {
-        LOG(INFO) << "LSoftmax changes beta to " << param_.beta;
-      }
-    }
   }
 
  private:
@@ -189,6 +199,8 @@ class LSoftmaxOp : public Operator {
   std::vector<DType> k_table_;
   std::vector<DType> c_table_;
   float next_beta_;
+  float beta_iter_;
+  float beta_;
 };  // class LSoftmaxOp
 
 template<typename xpu>

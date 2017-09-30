@@ -155,6 +155,7 @@ __global__ void LSoftmaxBackwardXKernel(const Tensor<gpu, 2, DType> x,
                                         const Tensor<gpu, 1, DType> c_table,
                                         const int margin,
                                         const DType beta) {
+  const DType eps = 1e-5;
   const int nthreads = x.size(0) * x.size(1);
   const int feature_dim = x.size(1);
   CUDA_KERNEL_LOOP(idx, nthreads) {
@@ -170,7 +171,7 @@ __global__ void LSoftmaxBackwardXKernel(const Tensor<gpu, 2, DType> x,
     const DType x_norm_i = x_norm[i];
 
     const DType dcos_dx = w[yi][l] / (w_norm_yi * x_norm_i) - \
-                          fo_i_yi * x[i][l] / (w_norm_yi * x_norm_i * x_norm_i * x_norm_i);
+                          fo_i_yi * x[i][l] / (w_norm_yi * x_norm_i * x_norm_i * x_norm_i + eps);
     const DType dsin2_dx = -2 * cos_t * dcos_dx;
     DType cos_t_p = workspace[kCostM][i];
     DType sin2_t_p = 1;
@@ -200,6 +201,7 @@ __global__ void LSoftmaxBackwardWKernel(const Tensor<gpu, 2, DType> x,
                                         const Tensor<gpu, 1, DType> c_table,
                                         const int margin,
                                         const DType beta) {
+  const DType eps = 1e-5;
   const int nthreads = w.size(0) * w.size(1);
   const int n = x.size(0);
   const int feature_dim = w.size(1);
@@ -219,7 +221,7 @@ __global__ void LSoftmaxBackwardWKernel(const Tensor<gpu, 2, DType> x,
         const DType w_norm_yi = w_norm[yi];
 
         const DType dcos_dw = x[i][l] / (w_norm_yi * x_norm_i) - \
-                              fo_i_yi * w[yi][l] / (x_norm_i * w_norm_yi * w_norm_yi * w_norm_yi);
+                              fo_i_yi * w[yi][l] / (x_norm_i * w_norm_yi * w_norm_yi * w_norm_yi + eps);
         const DType dsin2_dw = -2 * cos_t * dcos_dw;
         DType cos_t_p = workspace[kCostM][i];
         DType sin2_t_p = 1;
