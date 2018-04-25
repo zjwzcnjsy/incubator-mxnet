@@ -34,58 +34,10 @@
 #include <string>
 #include "./c_api_common.h"
 #include "../common/utils.h"
+#include "../common/exec_utils.h"
+#include "../imperative/imperative_utils.h"
 
 using namespace mxnet;
-
-nnvm::NodeAttrs ParseAttrs(const nnvm::Op *op,
-                           const int& num_inputs,
-                           const int& num_params,
-                           const char **param_keys,
-                           const char **param_vals) {
-  static auto& num_args = nnvm::Op::GetAttr<std::string>("key_var_num_args");
-
-  nnvm::NodeAttrs attrs;
-  attrs.op = op;
-  attrs.dict.reserve(num_params+1);
-  for (int i = 0; i < num_params; ++i) {
-    attrs.dict.emplace(param_keys[i], param_vals[i]);
-  }
-  if (num_args.count(op)) {
-    attrs.dict.emplace(num_args[op], std::to_string(num_inputs));
-  }
-  if (op->attr_parser != nullptr) {
-    op->attr_parser(&attrs);
-  }
-
-  return attrs;
-}
-
-void SetNumOutputs(const nnvm::Op *op,
-                   const nnvm::NodeAttrs& attrs,
-                   const int& num_inputs,
-                   int* infered_num_outputs,
-                   int* num_visible_outputs) {
-  static auto& visible_out = nnvm::Op::GetAttr<nnvm::FNumVisibleOutputs>("FNumVisibleOutputs");
-  int infered_num_inputs;
-  if (op->get_num_inputs != nullptr) {
-    infered_num_inputs = op->get_num_inputs(attrs);
-  } else {
-    infered_num_inputs = op->num_inputs;
-  }
-  CHECK_EQ(num_inputs, infered_num_inputs)
-    << "Operator " << op->name << " expects " << infered_num_inputs
-    << " inputs, but got " << num_inputs << "instead.";
-  if (op->get_num_outputs != nullptr) {
-    *infered_num_outputs = op->get_num_outputs(attrs);
-  } else {
-    *infered_num_outputs = op->num_outputs;
-  }
-  *num_visible_outputs = *infered_num_outputs;
-  if (visible_out.count(op)) {
-    *num_visible_outputs = visible_out[op](attrs);
-    CHECK_LE(*num_visible_outputs, *infered_num_outputs);
-  }
-}
 
 void SetNDInputsOutputs(const nnvm::Op* op,
                         std::vector<NDArray*>* ndinputs,
@@ -125,7 +77,6 @@ void SetNDInputsOutputs(const nnvm::Op* op,
   }
 }
 
-
 void MXImperativeInvokeImpl(AtomicSymbolCreator creator,
                             int num_inputs,
                             NDArrayHandle *inputs,
@@ -137,11 +88,12 @@ void MXImperativeInvokeImpl(AtomicSymbolCreator creator,
   const nnvm::Op* op = static_cast<nnvm::Op*>(creator);
   MXAPIThreadLocalEntry *ret = MXAPIThreadLocalStore::Get();
 
-  nnvm::NodeAttrs attrs = ParseAttrs(op, num_inputs, num_params, param_keys, param_vals);
+  nnvm::NodeAttrs attrs = imperative::ParseAttrs(op, num_inputs, num_params,
+                                                 param_keys, param_vals);
 
   int infered_num_outputs;
   int num_visible_outputs;
-  SetNumOutputs(op, attrs, num_inputs, &infered_num_outputs, &num_visible_outputs);
+  imperative::SetNumOutputs(op, attrs, num_inputs, &infered_num_outputs, &num_visible_outputs);
 
   std::vector<NDArray*> ndinputs, ndoutputs;
   SetNDInputsOutputs(op, &ndinputs, &ndoutputs, num_inputs, inputs,
@@ -204,8 +156,47 @@ int MXCreateCachedOp(SymbolHandle handle,
   nnvm::Symbol* sym = static_cast<nnvm::Symbol*>(handle);
 
   API_BEGIN();
+  auto inputs = sym->ListInputs(nnvm::Symbol::kAll);
+  std::vector<std::string> input_names;
+  input_names.reserve(inputs.size());
+  for (const auto& i : inputs) input_names.push_back(i->attrs.name);
   *out = new std::shared_ptr<Imperative::CachedOp>(
-      new Imperative::CachedOp(*sym));
+      new Imperative::CachedOp(
+        *sym,
+        std::vector<std::pair<std::string, std::string> >(),
+        input_names,
+        std::unordered_map<std::string, std::vector<NDArray> >()));
+  API_END();
+}
+
+int MXCreateCachedOpEx(SymbolHandle handle,
+                       int num_flags,
+                       const char** keys,
+                       const char** vals,
+                       int num_args,
+                       const char** arg_names,
+                       int num_params,
+                       const char** param_names,
+                       NDArrayHandle* params,
+                       CachedOpHandle *out) {
+  nnvm::Symbol* sym = static_cast<nnvm::Symbol*>(handle);
+
+  API_BEGIN();
+  std::vector<std::pair<std::string, std::string> > flags;
+  for (int i = 0; i < num_flags; ++i) {
+    flags.push_back({keys[i], vals[i]});
+  }
+  std::vector<std::string> args;
+  for (int i = 0; i < num_args; ++i) {
+    args.push_back(arg_names[i]);
+  }
+  std::unordered_map<std::string, std::vector<NDArray> > param_dict;
+  for (int i = 0; i < num_params; ++i) {
+    param_dict[param_names[i]].emplace_back(
+        *reinterpret_cast<NDArray*>(params[i]));
+  }
+  *out = new std::shared_ptr<Imperative::CachedOp>(
+      new Imperative::CachedOp(*sym, flags, args, param_dict));
   API_END();
 }
 
@@ -221,7 +212,6 @@ int MXInvokeCachedOp(CachedOpHandle handle,
                      NDArrayHandle *inputs,
                      int *num_outputs,
                      NDArrayHandle **outputs) {
-  static const auto cached_op = nnvm::Op::Get("_CachedOp");
   MXAPIThreadLocalEntry *ret = MXAPIThreadLocalStore::Get();
 
   API_BEGIN();
@@ -246,16 +236,7 @@ int MXInvokeCachedOp(CachedOpHandle handle,
     }
   }
 
-  OpStatePtr state = op->Forward(ndinputs, ndoutputs);
-  if (Imperative::Get()->is_recording()) {
-    nnvm::NodeAttrs attrs;
-    attrs.op = cached_op;
-    attrs.name = "_cachedop";
-    attrs.parsed = op;
-    Imperative::Get()->RecordOp(
-        std::move(attrs), ndinputs, ndoutputs, state,
-        &op->save_inputs(), &op->save_outputs());
-  }
+  op->Forward(op, ndinputs, ndoutputs);
 
   if (*outputs == nullptr) {
     ret->ret_handles.clear();

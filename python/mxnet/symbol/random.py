@@ -23,7 +23,7 @@ from .symbol import Symbol
 
 
 __all__ = ['uniform', 'normal', 'poisson', 'exponential', 'gamma', 'multinomial',
-           'negative_binomial', 'generalized_negative_binomial']
+           'negative_binomial', 'generalized_negative_binomial', 'shuffle']
 
 
 def _random_helper(random, sampler, params, shape, dtype, kwargs):
@@ -102,8 +102,6 @@ def poisson(lam=1, shape=_Null, dtype=_Null, **kwargs):
     Samples are distributed according to a Poisson distribution parametrized
     by *lambda* (rate). Samples will always be returned as a floating point data type.
 
-    .. note:: poisson is not implemented for GPU yet.
-
     Parameters
     ----------
     lam : float or Symbol
@@ -125,12 +123,10 @@ def exponential(scale=1, shape=_Null, dtype=_Null, **kwargs):
 
     Its probability density function is
 
-        f(x; \frac{1}{\beta}) = \frac{1}{\beta} \exp(-\frac{x}{\beta}),
+    .. math:: f(x; \frac{1}{\beta}) = \frac{1}{\beta} \exp(-\frac{x}{\beta}),
 
     for x > 0 and 0 elsewhere. \beta is the scale parameter, which is the
     inverse of the rate parameter \lambda = 1/\beta.
-
-    .. note:: exponential is not implemented for GPU yet.
 
     Parameters
     ----------
@@ -153,8 +149,6 @@ def gamma(alpha=1, beta=1, shape=_Null, dtype=_Null, **kwargs):
 
     Samples are distributed according to a gamma distribution parametrized
     by *alpha* (shape) and *beta* (scale).
-
-    .. note:: gamma is not implemented for GPU yet.
 
     Parameters
     ----------
@@ -183,8 +177,6 @@ def negative_binomial(k=1, p=1, shape=_Null, dtype=_Null, **kwargs):
     probability in each experiment). Samples will always be returned as a
     floating point data type.
 
-    .. note:: negative_binomial is not implemented for GPU yet.
-
     Parameters
     ----------
     k : float or Symbol
@@ -212,8 +204,6 @@ def generalized_negative_binomial(mu=1, alpha=1, shape=_Null, dtype=_Null, **kwa
     *alpha* is defined as *1/k* where *k* is the failure limit of the
     number of unsuccessful experiments (generalized to real numbers).
     Samples will always be returned as a floating point data type.
-
-    .. note:: negative_binomial is not implemented for GPU yet.
 
     Parameters
     ----------
@@ -257,3 +247,34 @@ def multinomial(data, shape=_Null, get_prob=True, **kwargs):
         reward as head gradient w.r.t. this array to estimate gradient.
     """
     return _internal._sample_multinomial(data, shape, get_prob, **kwargs)
+
+
+def shuffle(data, **kwargs):
+    """Shuffle the elements randomly.
+
+    This shuffles the array along the first axis.
+    The order of the elements in each subarray does not change.
+    For example, if a 2D array is given, the order of the rows randomly changes,
+    but the order of the elements in each row does not change.
+
+    Parameters
+    ----------
+    data : NDArray
+        Input data array.
+    Examples
+    --------
+    >>> data = mx.nd.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]])
+    >>> a = mx.sym.Variable('a')
+    >>> b = mx.sym.random.shuffle(a)
+    >>> b.eval(a=data)
+    [[ 0.  1.  2.]
+     [ 6.  7.  8.]
+     [ 3.  4.  5.]]
+    <NDArray 2x3 @cpu(0)>
+    >>> b.eval(a=data)
+    [[ 3.  4.  5.]
+     [ 0.  1.  2.]
+     [ 6.  7.  8.]]
+    <NDArray 2x3 @cpu(0)>
+    """
+    return _internal._shuffle(data, **kwargs)

@@ -84,7 +84,7 @@ avazu = {
     'data_name': 'avazu-app.t',
     'data_origin_name': 'avazu-app.t.bz2',
     'url': "https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/avazu-app.t.bz2",
-    'feature_dim': 1000000,
+    'feature_dim': 1000001,
     'lc': 1719304,
 }
 
@@ -92,7 +92,7 @@ kdda = {
     'data_name': 'kdda.t',
     'data_origin_name': 'kdda.t.bz2',
     'url': "https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary/kdda.t.bz2",
-    'feature_dim': 20216830,
+    'feature_dim': 20216831,
     'lc': 510302,
 }
 
@@ -239,8 +239,8 @@ if __name__ == '__main__':
             device = 'gpu' + str(args.num_gpu)
         name = 'profile_' + args.dataset + '_' + device + '_nworker' + str(num_worker)\
                + '_batchsize' + str(args.batch_size) + '_outdim' + str(args.output_dim) + '.json'
-        mx.profiler.profiler_set_config(mode='all', filename=name)
-        mx.profiler.profiler_set_state('run')
+        mx.profiler.set_config(profile_all=True, filename=name)
+        mx.profiler.set_state('run')
 
     logging.debug('start training ...')
     start = time.time()
@@ -253,7 +253,6 @@ if __name__ == '__main__':
         start_time_epoch = time.time()
         nbatch = 0
         end_of_batch = False
-        data_iter.reset()
         metric.reset()
         next_batch = next(data_iter)
         if kv is not None:
@@ -300,8 +299,9 @@ if __name__ == '__main__':
         logging.info('num_worker = {}, time cost per epoch = {}'.format(str(num_worker), str(time_cost_epoch)))
         if args.num_gpu < 1:
             logging.info('|cpu/{} cores| {} | {} | {} |'.format(str(num_cores), str(num_worker), str(average_cost_epoch), rank))
+        data_iter.reset()
     if profiler:
-        mx.profiler.profiler_set_state('stop')
+        mx.profiler.set_state('stop')
     end = time.time()
     time_cost = end - start
     logging.info('num_worker = {}, rank = {}, time cost = {}'.format(str(num_worker), str(rank), str(time_cost)))

@@ -22,6 +22,7 @@
 from __future__ import absolute_import
 
 from .context import Context, current_context, cpu, gpu
+from . import engine
 from .base import MXNetError
 from . import base
 from . import contrib
@@ -40,6 +41,7 @@ from . import random as rnd
 from . import random
 from . import optimizer
 from . import model
+from . import metric
 from . import notebook
 from . import initializer
 # use mx.init as short for mx.initializer

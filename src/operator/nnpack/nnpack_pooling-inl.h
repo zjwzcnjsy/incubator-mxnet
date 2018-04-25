@@ -18,6 +18,7 @@
  */
 
 /*!
+ * Copyright (c) 2016 by Contributors
  * \file nnpack_pooling-inl.h
  * \brief
  * \author Wei Wu
@@ -33,7 +34,7 @@
 #include <vector>
 #include <string>
 #include <utility>
-#include "../pooling-inl.h"
+#include "../nn/pooling-inl.h"
 #include "nnpack.h"
 #include "nnpack_util.h"
 

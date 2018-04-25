@@ -18,19 +18,23 @@
 # coding: utf-8
 # pylint: disable= arguments-differ
 """Base container class for all neural network models."""
+__all__ = ['Block', 'HybridBlock', 'SymbolBlock']
 
 import copy
+import warnings
+import re
+from collections import OrderedDict
 
 from .. import symbol, ndarray, initializer
 from ..symbol import Symbol
 from ..ndarray import NDArray
 from .. import name as _name
 from .parameter import Parameter, ParameterDict, DeferredInitializationError
-from .utils import _indent
+from .utils import _indent, _brief_print_list
 
 
 class _BlockScope(object):
-    """Scope for collecting child `Block`s."""
+    """Scope for collecting child `Block` s."""
     _current = None
 
     def __init__(self, block):
@@ -65,7 +69,7 @@ class _BlockScope(object):
 
     def __enter__(self):
         if self._block._empty_prefix:
-            return
+            return self
         self._old_scope = _BlockScope._current
         _BlockScope._current = self
         self._name_scope = _name.Prefix(self._block.prefix)
@@ -80,7 +84,7 @@ class _BlockScope(object):
         _BlockScope._current = self._old_scope
 
 
-def _flatten(args):
+def _flatten(args, inout_str):
     if isinstance(args, NDArray):
         return [args], int(0)
     if isinstance(args, Symbol):
@@ -89,12 +93,12 @@ def _flatten(args):
         return [args], int(length)
 
     assert isinstance(args, (list, tuple)), \
-        "HybridBlock input must be (nested) list of Symbol or NDArray, " \
-        "but got %s of type %s"%(str(args), str(type(args)))
+        "HybridBlock %s must be (nested) list of Symbol or NDArray, " \
+        "but got %s of type %s"%(inout_str, str(args), str(type(args)))
     flat = []
     fmts = []
     for i in args:
-        arg, fmt = _flatten(i)
+        arg, fmt = _flatten(i, inout_str)
         flat.extend(arg)
         fmts.append(fmt)
     return flat, fmts
@@ -120,8 +124,8 @@ class Block(object):
     """Base class for all neural network layers and models. Your models should
     subclass this class.
 
-    `Block` can be nested recursively in a tree structure. You can create and
-    assign child `Block` as regular attributes::
+    :py:class:`Block` can be nested recursively in a tree structure. You can create and
+    assign child :py:class:`Block` as regular attributes::
 
         from mxnet.gluon import Block, nn
         from mxnet import ndarray as F
@@ -130,7 +134,6 @@ class Block(object):
             def __init__(self, **kwargs):
                 super(Model, self).__init__(**kwargs)
                 # use name_scope to give child Blocks appropriate names.
-                # It also allows sharing Parameters between Blocks recursively.
                 with self.name_scope():
                     self.dense0 = nn.Dense(20)
                     self.dense1 = nn.Dense(20)
@@ -144,18 +147,20 @@ class Block(object):
         model(F.zeros((10, 10), ctx=mx.cpu(0)))
 
 
-    Child `Block` assigned this way will be registered and `collect_params`
+    Child :py:class:`Block` assigned this way will be registered and :py:meth:`collect_params`
     will collect their Parameters recursively.
 
     Parameters
     ----------
     prefix : str
-        Prefix acts like a name space. It will be prepended to the names of all
-        Parameters and child `Block`s in this `Block`'s `name_scope`. Prefix
-        should be unique within one model to prevent name collisions.
+        Prefix acts like a name space. All children blocks created in parent block's
+        :py:meth:`name_scope` will have parent block's prefix in their name.
+        Please refer to
+        `naming tutorial <http://mxnet.incubator.apache.org/tutorials/basic/naming.html>`_
+        for more info on prefix and naming.
     params : ParameterDict or None
-        `ParameterDict` for sharing weights with the new `Block`. For example,
-        if you want `dense1` to share `dense0`'s weights, you can do::
+        :py:class:`ParameterDict` for sharing weights with the new :py:class:`Block`. For example,
+        if you want ``dense1`` to share ``dense0``'s weights, you can do::
 
             dense0 = nn.Dense(20)
             dense1 = nn.Dense(20, params=dense0.collect_params())
@@ -165,15 +170,15 @@ class Block(object):
         self._prefix, self._params = _BlockScope.create(prefix, params, self._alias())
         self._name = self._prefix[:-1] if self._prefix.endswith('_') else self._prefix
         self._scope = _BlockScope(self)
-        self._children = []
+        self._children = OrderedDict()
+        self._reg_params = {}
 
     def __repr__(self):
         s = '{name}(\n{modstr}\n)'
         modstr = '\n'.join(['  ({key}): {block}'.format(key=key,
                                                         block=_indent(block.__repr__(), 2))
                             for key, block in self.__dict__.items() if isinstance(block, Block)])
-        return s.format(name=self.__class__.__name__,
-                        modstr=modstr)
+        return s.format(name=self.__class__.__name__, modstr=modstr)
 
     def __setattr__(self, name, value):
         """Registers parameters."""
@@ -182,54 +187,121 @@ class Block(object):
             existing = getattr(self, name)
             if isinstance(existing, (Parameter, Block)) and not isinstance(value, type(existing)):
                 raise TypeError('Changing attribute type for {name} from {type1} to {type2}' \
-                                'is not allowed.'.format(name=name,
-                                                         type1=type(existing),
-                                                         type2=type(value)))
-            if isinstance(existing, Block):
-                for i, c in enumerate(self._children):
-                    if c is existing:
-                        self._children[i] = value
-        else:
-            if isinstance(value, Block):
-                self.register_child(value)
+                                'is not allowed.'.format(
+                                    name=name, type1=type(existing), type2=type(value)))
+
+        if isinstance(value, Block):
+            self.register_child(value, name)
+        elif isinstance(value, Parameter):
+            assert name not in self._reg_params, \
+                "Overriding Parameter attribute %s is not allowed. " \
+                "If you want to share parameters between blocks, please set " \
+                "'params' at Block construction instead."
+            self._reg_params[name] = value
 
         super(Block, self).__setattr__(name, value)
+
+    def _check_container_with_block(self):
+        def _find_block_in_container(data):
+            # Find whether a nested container structure contains Blocks
+            if isinstance(data, (list, tuple)):
+                for ele in data:
+                    if _find_block_in_container(ele):
+                        return True
+                return False
+            elif isinstance(data, dict):
+                for _, v in data.items():
+                    if _find_block_in_container(v):
+                        return True
+                return False
+            elif isinstance(data, Block):
+                return True
+            else:
+                return False
+        for k, v in self.__dict__.items():
+            if isinstance(v, (list, tuple, dict)) and not (k.startswith('__') or k == '_children'):
+                if _find_block_in_container(v):
+                    warnings.warn('"{name}" is a container with Blocks. '
+                                  'Note that Blocks inside the list, tuple or dict will not be '
+                                  'registered automatically. Make sure to register them using '
+                                  'register_child() or switching to '
+                                  'nn.Sequential/nn.HybridSequential instead. '
+                                  .format(name=self.__class__.__name__ + "." + k), stacklevel=3)
 
     def _alias(self):
         return self.__class__.__name__.lower()
 
     @property
     def prefix(self):
-        """Prefix of this `Block`."""
+        """Prefix of this :py:class:`Block`."""
         return self._prefix
 
     @property
     def name(self):
-        """Name of this `Block`, without '_' in the end."""
+        """Name of this :py:class:`Block`, without '_' in the end."""
         return self._name
 
     def name_scope(self):
-        """Returns a name space object managing a child `Block` and parameter
-        names. Should be used within a `with` statement::
+        """Returns a name space object managing a child :py:class:`Block` and parameter
+        names. Should be used within a ``with`` statement::
 
             with self.name_scope():
                 self.dense = nn.Dense(20)
+
+        Please refer to
+        `naming tutorial <http://mxnet.incubator.apache.org/tutorials/basic/naming.html>`_
+        for more info on prefix and naming.
         """
         return self._scope
 
     @property
     def params(self):
-        """Returns this `Block`'s parameter dictionary (does not include its
+        """Returns this :py:class:`Block`'s parameter dictionary (does not include its
         children's parameters)."""
         return self._params
 
-    def collect_params(self):
-        """Returns a `ParameterDict` containing this `Block` and all of its
-        children's Parameters."""
+    def collect_params(self, select=None):
+        """Returns a :py:class:`ParameterDict` containing this :py:class:`Block` and all of its
+        children's Parameters(default), also can returns the select :py:class:`ParameterDict`
+        which match some given regular expressions.
+
+        For example, collect the specified parameter in ['conv1_weight', 'conv1_bias', 'fc_weight',
+        'fc_bias']::
+
+            model.collect_params('conv1_weight|conv1_bias|fc_weight|fc_bias')
+
+        or collect all paramters which their name ends with 'weight' or 'bias', this can be done
+        using regular expressions::
+
+            model.collect_params('.*weight|.*bias')
+
+        Parameters
+        ----------
+        select : str
+            regular expressions
+
+        Returns
+        -------
+        The selected :py:class:`ParameterDict`
+        """
+        # We need to check here because blocks inside containers are not supported.
+        self._check_container_with_block()
         ret = ParameterDict(self._params.prefix)
-        ret.update(self.params)
-        for cld in self._children:
-            ret.update(cld.collect_params())
+        if not select:
+            ret.update(self.params)
+        else:
+            pattern = re.compile(select)
+            ret.update({name:value for name, value in self.params.items() if pattern.match(name)})
+        for cld in self._children.values():
+            ret.update(cld.collect_params(select=select))
+        return ret
+
+    def _collect_params_with_prefix(self, prefix=''):
+        if prefix:
+            prefix += '.'
+        ret = {prefix + key : val for key, val in self._reg_params.items()}
+        for name, child in self._children.items():
+            ret.update(child._collect_params_with_prefix(prefix + name))
         return ret
 
     def save_params(self, filename):
@@ -238,15 +310,17 @@ class Block(object):
         filename : str
             Path to file.
         """
-        self.collect_params().save(filename, strip_prefix=self.prefix)
+        params = self._collect_params_with_prefix()
+        arg_dict = {key : val._reduce() for key, val in params.items()}
+        ndarray.save(filename, arg_dict)
 
-    def load_params(self, filename, ctx, allow_missing=False,
+    def load_params(self, filename, ctx=None, allow_missing=False,
                     ignore_extra=False):
         """Load parameters from file.
 
         filename : str
             Path to parameter file.
-        ctx : Context or list of Context
+        ctx : Context or list of Context, default cpu()
             Context(s) initialize loaded parameters on.
         allow_missing : bool, default False
             Whether to silently skip loading parameters not represents in the file.
@@ -254,40 +328,92 @@ class Block(object):
             Whether to silently ignore parameters from the file that are not
             present in this Block.
         """
-        self.collect_params().load(filename, ctx, allow_missing, ignore_extra,
-                                   self.prefix)
+        loaded = ndarray.load(filename)
+        params = self._collect_params_with_prefix()
+        if not loaded and not params:
+            return
+
+        if not any('.' in i for i in loaded.keys()):
+            # legacy loading
+            del loaded
+            self.collect_params().load(
+                filename, ctx, allow_missing, ignore_extra, self.prefix)
+            return
+
+        if not allow_missing:
+            for name in params.keys():
+                assert name in loaded, \
+                    "Parameter '%s' is missing in file '%s', which contains parameters: %s. " \
+                    "Set allow_missing=True to ignore missing parameters."%(
+                        name, filename, _brief_print_list(loaded.keys()))
+        for name in loaded:
+            if not ignore_extra and name not in params:
+                raise ValueError(
+                    "Parameter '%s' loaded from file '%s' is not present in ParameterDict, " \
+                    "which contains parameters %s. Set ignore_extra=True to ignore. "%(
+                        name, filename, _brief_print_list(self._params.keys())))
+            params[name]._load_init(loaded[name], ctx)
 
 
-    def register_child(self, block):
-        """Registers block as a child of self. `Block`s assigned to self as
+    def register_child(self, block, name=None):
+        """Registers block as a child of self. :py:class:`Block` s assigned to self as
         attributes will be registered automatically."""
-        self._children.append(block)
+        if name is None:
+            name = str(len(self._children))
+        self._children[name] = block
 
-    def initialize(self, init=initializer.Uniform(), ctx=None, verbose=False):
-        """Initializes `Parameter`s of this `Block` and its children.
+    def initialize(self, init=initializer.Uniform(), ctx=None, verbose=False,
+                   force_reinit=False):
+        """Initializes :py:class:`Parameter` s of this :py:class:`Block` and its children.
+        Equivalent to ``block.collect_params().initialize(...)``
 
-        Equivalent to `block.collect_params().initialize(...)`
+        Parameters
+        ----------
+        init : Initializer
+            Global default Initializer to be used when :py:meth:`Parameter.init` is ``None``.
+            Otherwise, :py:meth:`Parameter.init` takes precedence.
+        ctx : Context or list of Context
+            Keeps a copy of Parameters on one or many context(s).
+        verbose : bool, default False
+            Whether to verbosely print out details on initialization.
+        force_reinit : bool, default False
+            Whether to force re-initialization if parameter is already initialized.
         """
-        self.collect_params().initialize(init, ctx, verbose)
+        self.collect_params().initialize(init, ctx, verbose, force_reinit)
 
-    def hybridize(self, active=True):
-        """Activates or deactivates `HybridBlock`s recursively. Has no effect on
+    def hybridize(self, active=True, **kwargs):
+        """Activates or deactivates :py:class:`HybridBlock` s recursively. Has no effect on
         non-hybrid children.
 
         Parameters
         ----------
         active : bool, default True
             Whether to turn hybrid on or off.
+        **kwargs : string
+            Additional flags for hybridized operator.
         """
-        for cld in self._children:
-            cld.hybridize(active)
+        for cld in self._children.values():
+            cld.hybridize(active, **kwargs)
+
+    def cast(self, dtype):
+        """Cast this Block to use another data type.
+
+        Parameters
+        ----------
+        dtype : str or numpy.dtype
+            The new data type.
+        """
+        for child in self._children.values():
+            child.cast(dtype)
+        for _, param in self.params.items():
+            param.cast(dtype)
 
     def __call__(self, *args):
         """Calls forward. Only accepts positional arguments."""
         return self.forward(*args)
 
     def forward(self, *args):
-        """Overrides to implement forward computation using `NDArray`. Only
+        """Overrides to implement forward computation using :py:class:`NDArray`. Only
         accepts positional arguments.
 
         Parameters
@@ -302,130 +428,204 @@ class Block(object):
 class HybridBlock(Block):
     """`HybridBlock` supports forwarding with both Symbol and NDArray.
 
-    Forward computation in `HybridBlock` must be static to work with `Symbol`s,
-    i.e. you cannot call `.asnumpy()`, `.shape`, `.dtype`, etc on tensors.
+    Forward computation in :py:class:`HybridBlock` must be static to work with :py:class:`Symbol` s,
+    i.e. you cannot call :py:meth:`NDArray.asnumpy`, :py:attr:`NDArray.shape`,
+    :py:attr:`NDArray.dtype`, etc on tensors.
     Also, you cannot use branching or loop logic that bases on non-constant
     expressions like random numbers or intermediate results, since they change
     the graph structure for each iteration.
 
-    Before activating with `hybridize()`, `HybridBlock` works just like normal
-    `Block`. After activation, `HybridBlock` will create a symbolic graph
+    Before activating with :py:meth:`hybridize()`, :py:class:`HybridBlock` works just like normal
+    :py:class:`Block`. After activation, :py:class:`HybridBlock` will create a symbolic graph
     representing the forward computation and cache it. On subsequent forwards,
-    the cached graph will be used instead of `hybrid_forward`.
+    the cached graph will be used instead of :py:meth:`hybrid_forward`.
 
     Refer `Hybrid tutorial <http://mxnet.io/tutorials/gluon/hybrid.html>`_ to see
     the end-to-end usage.
     """
     def __init__(self, prefix=None, params=None):
         super(HybridBlock, self).__init__(prefix=prefix, params=params)
-        self._reg_params = {}
         self._cached_graph = ()
         self._cached_op = None
-        self._cached_params = None
         self._out_format = None
         self._in_format = None
         self._active = False
+        self._flags = {}
 
     def __setattr__(self, name, value):
         """Registers parameters."""
         super(HybridBlock, self).__setattr__(name, value)
-        if isinstance(value, Parameter):
-            assert name not in self._reg_params or \
-                not isinstance(self._reg_params[name], Parameter), \
-                "Overriding Parameter attribute %s is not allowed. " \
-                "Please pass in Parameters by specifying `params` at " \
-                "Block construction instead."
-            self._reg_params[name] = value
-
-    def register_child(self, block):
-        if not isinstance(block, HybridBlock):
-            raise ValueError(
-                "Children of HybridBlock must also be HybridBlock, " \
-                "but %s has type %s. If you are using Sequential, " \
-                "please try HybridSequential instead"%(
-                    str(block), str(type(block))))
-        super(HybridBlock, self).register_child(block)
-
-    def hybridize(self, active=True):
-        self._active = active
-        super(HybridBlock, self).hybridize(active)
+        if isinstance(value, HybridBlock):
+            self._clear_cached_op()
 
     def _get_graph(self, *args):
         if not self._cached_graph:
-            args, self._in_format = _flatten(args)
-            inputs = [symbol.var('input_%d'%i) for i in range(len(args))]
+            args, self._in_format = _flatten(args, "input")
+            if len(args) > 1:
+                inputs = [symbol.var('data%d'%i) for i in range(len(args))]
+            else:
+                inputs = [symbol.var('data')]
             grouped_inputs = _regroup(inputs, self._in_format)[0]
 
             params = {i: j.var() for i, j in self._reg_params.items()}
             with self.name_scope():
                 out = self.hybrid_forward(symbol, *grouped_inputs, **params)  # pylint: disable=no-value-for-parameter
-            out, self._out_format = _flatten(out)
+            out, self._out_format = _flatten(out, "output")
 
             self._cached_graph = inputs, symbol.Group(out)
 
         return self._cached_graph
 
-    def infer_shape(self, *args):
-        """Infers shape of Parameters from inputs."""
-        inputs, out = self._get_graph(*args)
-        args, _ = _flatten(args)
-        arg_shapes, _, aux_shapes = out.infer_shape(
-            **{i.name: j.shape for i, j in zip(inputs, args)})
-        sdict = {i: j for i, j in zip(out.list_arguments(), arg_shapes)}
-        sdict.update({name : shape for name, shape in \
-                      zip(out.list_auxiliary_states(), aux_shapes)})
-        for i in self.collect_params().values():
-            i.shape = sdict[i.name]
-
     def _build_cache(self, *args):
         inputs, out = self._get_graph(*args)
-        self._cached_op = ndarray.CachedOp(out)
+        input_names = [i.name for i in inputs]
 
-        params = dict(self.collect_params().items())
-        self._cached_params = [params.get(name, None) for name in out.list_inputs()]
-        assert len(params) + len(self._cached_graph[0]) == len(out.list_inputs()), \
-            "Wrong number of inputs."
+        params = self.collect_params()
+        param_names = set(params.keys())
+        expected_names = set(out.list_inputs())
+        for name in expected_names:
+            assert name in param_names or name in input_names, \
+                "Unknown input to HybridBlock: %s"%name
 
-        name2pos = {var.name: i for i, var in enumerate(inputs)}
-        self._in_idx = [(i, name2pos[name]) for i, name in enumerate(out.list_inputs())
-                        if name not in params]
+        used_input_names = [i for i in input_names if i in expected_names]
+        if len(used_input_names) != len(input_names):
+            unused = ', '.join(['%d-th'%i for i, name in enumerate(input_names)
+                                if name not in expected_names])
+            warnings.warn("The %s input to HybridBlock is not used by any "
+                          "computation. Is this intended?"%unused, stacklevel=4)
+
+        used_param_names = set(i for i in param_names if i in expected_names)
+        if len(used_param_names) != len(param_names):
+            unused = ', '.join(list(param_names - used_param_names))
+            warnings.warn("Parameter %s is not used by any computation. "
+                          "Is this intended?"%unused, stacklevel=4)
+
+        used_params = {k: params[k] for k in used_param_names}
+        try:
+            param_dict = {k: v.list_data() for k, v in used_params.items()}
+        except DeferredInitializationError:
+            self._deferred_infer_shape(*args)
+            for i in used_params.values():
+                i._finish_deferred_init()
+            param_dict = {k: v.list_data() for k, v in used_params.items()}
+
+        self._cached_op = ndarray.CachedOp(out, self._flags, input_names, param_dict)
+
+    def _deferred_infer_shape(self, *args):
+        try:
+            self.infer_shape(*args)
+        except Exception as e:
+            error_msg = "Deferred initialization failed because shape"\
+                        " cannot be inferred. {}".format(e)
+            raise ValueError(error_msg)
 
     def _call_cached_op(self, *args):
         if self._cached_op is None:
             self._build_cache(*args)
 
-        try:
-            cargs = [i.data() if i else None for i in self._cached_params]
-        except DeferredInitializationError:
-            self.infer_shape(*args)
-            for i in self._cached_params:
-                if i is not None:
-                    i._finish_deferred_init()
-            cargs = [i.data() if i else None for i in self._cached_params]
-
-        args, fmt = _flatten(args)
+        args, fmt = _flatten(args, "input")
         assert fmt == self._in_format, "Invalid input format"
-        for i, j in self._in_idx:
-            cargs[i] = args[j]
-        out = self._cached_op(*cargs)
+        out = self._cached_op(*args)
         if isinstance(out, NDArray):
             out = [out]
         return _regroup(out, self._out_format)[0]
 
+    def _clear_cached_op(self):
+        self._cached_graph = ()
+        self._cached_op = None
+
+    def register_child(self, block, name=None):
+        if not isinstance(block, HybridBlock):
+            raise ValueError(
+                "Children of HybridBlock must also be HybridBlock, " \
+                "but %s has type %s. If you are using Sequential, " \
+                "please try HybridSequential instead."%(
+                    str(block), str(type(block))))
+        super(HybridBlock, self).register_child(block, name)
+        self._clear_cached_op()
+
+    def hybridize(self, active=True, **kwargs):
+        self._active = active
+        self._flags = kwargs.items()
+        self._clear_cached_op()
+        super(HybridBlock, self).hybridize(active, **kwargs)
+
+    def cast(self, dtype):
+        self._clear_cached_op()
+        super(HybridBlock, self).cast(dtype)
+
+    def _infer_attrs(self, infer_fn, attr, *args):
+        """Generic infer attributes."""
+        inputs, out = self._get_graph(*args)
+        args, _ = _flatten(args, "input")
+        with warnings.catch_warnings(record=True) as w:
+            arg_attrs, _, aux_attrs = getattr(out, infer_fn)(
+                **{i.name: getattr(j, attr) for i, j in zip(inputs, args)})
+            if arg_attrs is None:
+                raise ValueError(w[0].message)
+        sdict = {i: j for i, j in zip(out.list_arguments(), arg_attrs)}
+        sdict.update({name : attr for name, attr in \
+             zip(out.list_auxiliary_states(), aux_attrs)})
+        for i in self.collect_params().values():
+            setattr(i, attr, sdict[i.name])
+
+    def infer_shape(self, *args):
+        """Infers shape of Parameters from inputs."""
+        self._infer_attrs('infer_shape', 'shape', *args)
+
+    def infer_type(self, *args):
+        """Infers data type of Parameters from inputs."""
+        self._infer_attrs('infer_type', 'dtype', *args)
+
+    def export(self, path, epoch=0):
+        """Export HybridBlock to json format that can be loaded by `mxnet.mod.Module`
+        or the C++ interface.
+
+        .. note:: When there are only one input, it will have name `data`. When there
+                  Are more than one inputs, they will be named as `data0`, `data1`, etc.
+
+        Parameters
+        ----------
+        path : str
+            Path to save model. Two files `path-symbol.json` and `path-xxxx.params`
+            will be created, where xxxx is the 4 digits epoch number.
+        epoch : int
+            Epoch number of saved model.
+        """
+        if not self._cached_graph:
+            raise RuntimeError(
+                "Please first call block.hybridize() and then run forward with "
+                "this block at least once before calling export.")
+        sym = self._cached_graph[1]
+        sym.save('%s-symbol.json'%path)
+
+        arg_names = set(sym.list_arguments())
+        aux_names = set(sym.list_auxiliary_states())
+        arg_dict = {}
+        for name, param in self.collect_params().items():
+            if name in arg_names:
+                arg_dict['arg:%s'%name] = param._reduce()
+            else:
+                assert name in aux_names
+                arg_dict['aux:%s'%name] = param._reduce()
+        ndarray.save('%s-%04d.params'%(path, epoch), arg_dict)
+
     def forward(self, x, *args):
         """Defines the forward computation. Arguments can be either
-        `NDArray` or `Symbol`."""
+        :py:class:`NDArray` or :py:class:`Symbol`."""
         if isinstance(x, NDArray):
             with x.context as ctx:
                 if self._active:
                     return self._call_cached_op(x, *args)
+
                 try:
                     params = {i: j.data(ctx) for i, j in self._reg_params.items()}
                 except DeferredInitializationError:
-                    self.infer_shape(x, *args)
-                    for i in self.collect_params().values():
+                    self._deferred_infer_shape(x, *args)
+                    for _, i in self.params.items():
                         i._finish_deferred_init()
                     params = {i: j.data(ctx) for i, j in self._reg_params.items()}
+
                 return self.hybrid_forward(ndarray, x, *args, **params)
 
         assert isinstance(x, Symbol), \
@@ -451,7 +651,7 @@ class HybridBlock(Block):
 
 class SymbolBlock(HybridBlock):
     """Construct block from symbol. This is useful for using pre-trained models
-    as feature extractors. For example, you may want to extract get the output
+    as feature extractors. For example, you may want to extract the output
     from fc2 layer in AlexNet.
 
     Parameters
@@ -490,8 +690,8 @@ class SymbolBlock(HybridBlock):
         if isinstance(outputs, (list, tuple)) and len(outputs) == 1:
             outputs = outputs[0]
 
-        syms, self._in_format = _flatten(inputs)
-        out, self._out_format = _flatten(outputs)
+        syms, self._in_format = _flatten(inputs, "input")
+        out, self._out_format = _flatten(outputs, "output")
         out = symbol.Group(out)
 
         input_names = set()
@@ -509,7 +709,6 @@ class SymbolBlock(HybridBlock):
                 self.params.get(i, grad_req='null', allow_deferred_init=True)
 
         self._cached_graph = syms, out
-        self._build_cache()
 
     def forward(self, x, *args):
         if isinstance(x, NDArray):
@@ -519,11 +718,16 @@ class SymbolBlock(HybridBlock):
         assert isinstance(x, Symbol), \
             "HybridBlock requires the first argument to forward be either " \
             "Symbol or NDArray, but got %s"%type(x)
-        args, in_fmt = _flatten([x] + list(args))
+        args, in_fmt = _flatten([x] + list(args), "input")
         assert in_fmt == self._in_format, "Invalid input format"
         ret = copy.copy(self._cached_graph[1])
         ret._compose(**{k.name: v for k, v in zip(self._cached_graph[0], args)})
         return _regroup(list(ret), self._out_format)[0]
+
+    def _clear_cached_op(self):
+        tmp = self._cached_graph
+        super(SymbolBlock, self)._clear_cached_op()
+        self._cached_graph = tmp
 
     def hybrid_forward(self, F, x, *args, **kwargs):
         raise NotImplementedError

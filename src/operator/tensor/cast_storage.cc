@@ -46,6 +46,8 @@ The storage type of ``cast_storage`` output depends on stype parameter:
 - cast_storage(row_sparse, 'default') = default
 - cast_storage(default, 'csr') = csr
 - cast_storage(default, 'row_sparse') = row_sparse
+- cast_storage(csr, 'csr') = csr
+- cast_storage(row_sparse, 'row_sparse') = row_sparse
 
 Example::
 
@@ -55,13 +57,13 @@ Example::
              [ 0.,  0.,  0.]]
 
     # cast to row_sparse storage type
-    rsp = cast_storage(default, 'row_sparse')
+    rsp = cast_storage(dense, 'row_sparse')
     rsp.indices = [0, 1]
     rsp.values = [[ 0.,  1.,  0.],
                   [ 2.,  0.,  3.]]
 
     # cast to csr storage type
-    csr = cast_storage(default, 'csr')
+    csr = cast_storage(dense, 'csr')
     csr.indices = [1, 0, 2]
     csr.values = [ 1.,  2.,  3.]
     csr.indptr = [0, 1, 3, 3, 3]

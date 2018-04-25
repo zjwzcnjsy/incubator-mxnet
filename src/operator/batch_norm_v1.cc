@@ -18,6 +18,7 @@
  */
 
 /*!
+ * Copyright (c) 2015 by Contributors
  * \file batch_norm_v1.cc
  * \brief
  * \author Bing Xu
@@ -47,6 +48,8 @@ DMLC_REGISTER_PARAMETER(BatchNormV1Param);
 
 MXNET_REGISTER_OP_PROPERTY(BatchNorm_v1, BatchNormV1Prop)
 .describe(R"code(Batch normalization.
+
+This operator is DEPRECATED. Perform BatchNorm on the input.
 
 Normalizes a data batch by mean and variance, and applies a scale ``gamma`` as
 well as offset ``beta``.

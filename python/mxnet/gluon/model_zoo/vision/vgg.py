@@ -24,6 +24,8 @@ __all__ = ['VGG',
            'vgg11_bn', 'vgg13_bn', 'vgg16_bn', 'vgg19_bn',
            'get_vgg']
 
+import os
+
 from ....context import cpu
 from ....initializer import Xavier
 from ...block import HybridBlock
@@ -50,18 +52,17 @@ class VGG(HybridBlock):
         assert len(layers) == len(filters)
         with self.name_scope():
             self.features = self._make_features(layers, filters, batch_norm)
-            self.classifier = nn.HybridSequential(prefix='')
-            self.classifier.add(nn.Dense(4096, activation='relu',
-                                         weight_initializer='normal',
-                                         bias_initializer='zeros'))
-            self.classifier.add(nn.Dropout(rate=0.5))
-            self.classifier.add(nn.Dense(4096, activation='relu',
-                                         weight_initializer='normal',
-                                         bias_initializer='zeros'))
-            self.classifier.add(nn.Dropout(rate=0.5))
-            self.classifier.add(nn.Dense(classes,
-                                         weight_initializer='normal',
-                                         bias_initializer='zeros'))
+            self.features.add(nn.Dense(4096, activation='relu',
+                                       weight_initializer='normal',
+                                       bias_initializer='zeros'))
+            self.features.add(nn.Dropout(rate=0.5))
+            self.features.add(nn.Dense(4096, activation='relu',
+                                       weight_initializer='normal',
+                                       bias_initializer='zeros'))
+            self.features.add(nn.Dropout(rate=0.5))
+            self.output = nn.Dense(classes,
+                                   weight_initializer='normal',
+                                   bias_initializer='zeros')
 
     def _make_features(self, layers, filters, batch_norm):
         featurizer = nn.HybridSequential(prefix='')
@@ -80,7 +81,7 @@ class VGG(HybridBlock):
 
     def hybrid_forward(self, F, x):
         x = self.features(x)
-        x = self.classifier(x)
+        x = self.output(x)
         return x
 
 
@@ -92,7 +93,8 @@ vgg_spec = {11: ([1, 1, 2, 2, 2], [64, 128, 256, 512, 512]),
 
 
 # Constructors
-def get_vgg(num_layers, pretrained=False, ctx=cpu(), root='~/.mxnet/models', **kwargs):
+def get_vgg(num_layers, pretrained=False, ctx=cpu(),
+            root=os.path.join('~', '.mxnet', 'models'), **kwargs):
     r"""VGG model from the `"Very Deep Convolutional Networks for Large-Scale Image Recognition"
     <https://arxiv.org/abs/1409.1556>`_ paper.
 

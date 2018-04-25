@@ -20,6 +20,11 @@
 # pylint: disable=too-many-branches, too-many-arguments, no-self-use
 # pylint: disable=too-many-lines, arguments-differ
 """Definition of various recurrent neural network cells."""
+__all__ = ['RecurrentCell', 'HybridRecurrentCell',
+           'RNNCell', 'LSTMCell', 'GRUCell',
+           'SequentialRNNCell', 'DropoutCell',
+           'ModifierCell', 'ZoneoutCell', 'ResidualCell',
+           'BidirectionalCell']
 
 from ... import symbol, ndarray
 from ...base import string_types, numeric_types, _as_list
@@ -78,8 +83,7 @@ def _format_sequence(length, inputs, layout, merge, in_layout=None):
             F = ndarray
             batch_size = inputs[0].shape[batch_axis]
         if merge is True:
-            inputs = [F.expand_dims(i, axis=axis) for i in inputs]
-            inputs = F.concat(*inputs, dim=axis)
+            inputs = F.stack(*inputs, axis=axis)
             in_axis = axis
 
     if isinstance(inputs, tensor_types) and axis != in_axis:
@@ -87,6 +91,16 @@ def _format_sequence(length, inputs, layout, merge, in_layout=None):
 
     return inputs, axis, F, batch_size
 
+def _mask_sequence_variable_length(F, data, length, valid_length, time_axis, merge):
+    assert valid_length is not None
+    if not isinstance(data, tensor_types):
+        data = F.stack(*data, axis=time_axis)
+    outputs = F.SequenceMask(data, sequence_length=valid_length, use_sequence_length=True,
+                             axis=time_axis)
+    if not merge:
+        outputs = _as_list(F.split(outputs, num_outputs=length, axis=time_axis,
+                                   squeeze_axis=True))
+    return outputs
 
 class RecurrentCell(Block):
     """Abstract base class for RNN cells
@@ -106,22 +120,11 @@ class RecurrentCell(Block):
         self._modified = False
         self.reset()
 
-    def __repr__(self):
-        s = '{name}({mapping}'
-        if hasattr(self, '_activation'):
-            s += ', {_activation}'
-        s += ')'
-        mapping = ('{_input_size} -> {_hidden_size}'.format(**self.__dict__) if self._input_size
-                   else self._hidden_size)
-        return s.format(name=self.__class__.__name__,
-                        mapping=mapping,
-                        **self.__dict__)
-
     def reset(self):
         """Reset before re-using the cell for another graph."""
         self._init_counter = -1
         self._counter = -1
-        for cell in self._children:
+        for cell in self._children.values():
             cell.reset()
 
     def state_info(self, batch_size=0):
@@ -169,7 +172,8 @@ class RecurrentCell(Block):
             states.append(state)
         return states
 
-    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None):
+    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None,
+               valid_length=None):
         """Unrolls an RNN cell across time steps.
 
         Parameters
@@ -199,6 +203,15 @@ class RecurrentCell(Block):
             (batch_size, length, ...) if layout is 'NTC',
             or (length, batch_size, ...) if layout is 'TNC'.
             If `None`, output whatever is faster.
+        valid_length : Symbol, NDArray or None
+            `valid_length` specifies the length of the sequences in the batch without padding.
+            This option is especially useful for building sequence-to-sequence models where
+            the input and output sequences would potentially be padded.
+            If `valid_length` is None, all sequences are assumed to have the same length.
+            If `valid_length` is a Symbol or NDArray, it should have shape (batch_size,).
+            The ith element will be the length of the ith sequence in the batch.
+            The last valid state will be return and the padded outputs will be masked with 0.
+            Note that `valid_length` must be smaller or equal to `length`.
 
         Returns
         -------
@@ -213,15 +226,24 @@ class RecurrentCell(Block):
         """
         self.reset()
 
-        inputs, _, F, batch_size = _format_sequence(length, inputs, layout, False)
+        inputs, axis, F, batch_size = _format_sequence(length, inputs, layout, False)
         begin_state = _get_begin_state(self, F, begin_state, inputs, batch_size)
 
         states = begin_state
         outputs = []
+        all_states = []
         for i in range(length):
             output, states = self(inputs[i], states)
             outputs.append(output)
-
+            if valid_length is not None:
+                all_states.append(states)
+        if valid_length is not None:
+            states = [F.SequenceLast(F.stack(*ele_list, axis=0),
+                                     sequence_length=valid_length,
+                                     use_sequence_length=True,
+                                     axis=0)
+                      for ele_list in zip(*all_states)]
+            outputs = _mask_sequence_variable_length(F, outputs, length, valid_length, axis, True)
         outputs, _, _, _ = _format_sequence(length, outputs, layout, merge_outputs)
 
         return outputs, states
@@ -277,7 +299,17 @@ class HybridRecurrentCell(RecurrentCell, HybridBlock):
 
 
 class RNNCell(HybridRecurrentCell):
-    """Simple recurrent neural network cell.
+    r"""Elman RNN recurrent neural network cell.
+
+    Each call computes the following function:
+
+    .. math::
+
+        h_t = \tanh(w_{ih} * x_t + b_{ih}  +  w_{hh} * h_{(t-1)} + b_{hh})
+
+    where :math:`h_t` is the hidden state at time `t`, and :math:`x_t` is the hidden
+    state of the previous layer at time `t` or :math:`input_t` for the first layer.
+    If nonlinearity='relu', then `ReLU` is used instead of `tanh`.
 
     Parameters
     ----------
@@ -301,6 +333,17 @@ class RNNCell(HybridRecurrentCell):
     params : Parameter or None
         Container for weight sharing between cells.
         Created if `None`.
+
+
+    Inputs:
+        - **data**: input tensor with shape `(batch_size, input_size)`.
+        - **states**: a list of one initial recurrent state tensor with shape
+          `(batch_size, num_hidden)`.
+
+    Outputs:
+        - **out**: output tensor with shape `(batch_size, num_hidden)`.
+        - **next_states**: a list of one output recurrent state tensor with the
+          same shape as `states`.
     """
     def __init__(self, hidden_size, activation='tanh',
                  i2h_weight_initializer=None, h2h_weight_initializer=None,
@@ -329,6 +372,17 @@ class RNNCell(HybridRecurrentCell):
     def _alias(self):
         return 'rnn'
 
+    def __repr__(self):
+        s = '{name}({mapping}'
+        if hasattr(self, '_activation'):
+            s += ', {_activation}'
+        s += ')'
+        shape = self.i2h_weight.shape
+        mapping = '{0} -> {1}'.format(shape[1] if shape[1] else None, shape[0])
+        return s.format(name=self.__class__.__name__,
+                        mapping=mapping,
+                        **self.__dict__)
+
     def hybrid_forward(self, F, inputs, states, i2h_weight,
                        h2h_weight, i2h_bias, h2h_bias):
         prefix = 't%d_'%self._counter
@@ -345,7 +399,25 @@ class RNNCell(HybridRecurrentCell):
 
 
 class LSTMCell(HybridRecurrentCell):
-    """Long-Short Term Memory (LSTM) network cell.
+    r"""Long-Short Term Memory (LSTM) network cell.
+
+    Each call computes the following function:
+
+    .. math::
+        \begin{array}{ll}
+        i_t = sigmoid(W_{ii} x_t + b_{ii} + W_{hi} h_{(t-1)} + b_{hi}) \\
+        f_t = sigmoid(W_{if} x_t + b_{if} + W_{hf} h_{(t-1)} + b_{hf}) \\
+        g_t = \tanh(W_{ig} x_t + b_{ig} + W_{hc} h_{(t-1)} + b_{hg}) \\
+        o_t = sigmoid(W_{io} x_t + b_{io} + W_{ho} h_{(t-1)} + b_{ho}) \\
+        c_t = f_t * c_{(t-1)} + i_t * g_t \\
+        h_t = o_t * \tanh(c_t)
+        \end{array}
+
+    where :math:`h_t` is the hidden state at time `t`, :math:`c_t` is the
+    cell state at time `t`, :math:`x_t` is the hidden state of the previous
+    layer at time `t` or :math:`input_t` for the first layer, and :math:`i_t`,
+    :math:`f_t`, :math:`g_t`, :math:`o_t` are the input, forget, cell, and
+    out gates, respectively.
 
     Parameters
     ----------
@@ -369,6 +441,17 @@ class LSTMCell(HybridRecurrentCell):
     params : Parameter or None
         Container for weight sharing between cells.
         Created if `None`.
+
+
+    Inputs:
+        - **data**: input tensor with shape `(batch_size, input_size)`.
+        - **states**: a list of two initial recurrent state tensors. Each has shape
+          `(batch_size, num_hidden)`.
+
+    Outputs:
+        - **out**: output tensor with shape `(batch_size, num_hidden)`.
+        - **next_states**: a list of two output recurrent state tensors. Each has
+          the same shape as `states`.
     """
     def __init__(self, hidden_size,
                  i2h_weight_initializer=None, h2h_weight_initializer=None,
@@ -398,6 +481,14 @@ class LSTMCell(HybridRecurrentCell):
     def _alias(self):
         return 'lstm'
 
+    def __repr__(self):
+        s = '{name}({mapping})'
+        shape = self.i2h_weight.shape
+        mapping = '{0} -> {1}'.format(shape[1] if shape[1] else None, shape[0])
+        return s.format(name=self.__class__.__name__,
+                        mapping=mapping,
+                        **self.__dict__)
+
     def hybrid_forward(self, F, inputs, states, i2h_weight,
                        h2h_weight, i2h_bias, h2h_bias):
         prefix = 't%d_'%self._counter
@@ -420,9 +511,23 @@ class LSTMCell(HybridRecurrentCell):
 
 
 class GRUCell(HybridRecurrentCell):
-    """Gated Rectified Unit (GRU) network cell.
+    r"""Gated Rectified Unit (GRU) network cell.
     Note: this is an implementation of the cuDNN version of GRUs
     (slight modification compared to Cho et al. 2014).
+
+    Each call computes the following function:
+
+    .. math::
+        \begin{array}{ll}
+        r_t = sigmoid(W_{ir} x_t + b_{ir} + W_{hr} h_{(t-1)} + b_{hr}) \\
+        i_t = sigmoid(W_{ii} x_t + b_{ii} + W_hi h_{(t-1)} + b_{hi}) \\
+        n_t = \tanh(W_{in} x_t + b_{in} + r_t * (W_{hn} h_{(t-1)}+ b_{hn})) \\
+        h_t = (1 - i_t) * n_t + i_t * h_{(t-1)} \\
+        \end{array}
+
+    where :math:`h_t` is the hidden state at time `t`, :math:`x_t` is the hidden
+    state of the previous layer at time `t` or :math:`input_t` for the first layer,
+    and :math:`r_t`, :math:`i_t`, :math:`n_t` are the reset, input, and new gates, respectively.
 
     Parameters
     ----------
@@ -444,6 +549,17 @@ class GRUCell(HybridRecurrentCell):
     params : Parameter or None
         Container for weight sharing between cells.
         Created if `None`.
+
+
+    Inputs:
+        - **data**: input tensor with shape `(batch_size, input_size)`.
+        - **states**: a list of one initial recurrent state tensor with shape
+          `(batch_size, num_hidden)`.
+
+    Outputs:
+        - **out**: output tensor with shape `(batch_size, num_hidden)`.
+        - **next_states**: a list of one output recurrent state tensor with the
+          same shape as `states`.
     """
     def __init__(self, hidden_size,
                  i2h_weight_initializer=None, h2h_weight_initializer=None,
@@ -470,6 +586,14 @@ class GRUCell(HybridRecurrentCell):
 
     def _alias(self):
         return 'gru'
+
+    def __repr__(self):
+        s = '{name}({mapping})'
+        shape = self.i2h_weight.shape
+        mapping = '{0} -> {1}'.format(shape[1] if shape[1] else None, shape[0])
+        return s.format(name=self.__class__.__name__,
+                        mapping=mapping,
+                        **self.__dict__)
 
     def hybrid_forward(self, F, inputs, states, i2h_weight,
                        h2h_weight, i2h_bias, h2h_bias):
@@ -515,31 +639,32 @@ class SequentialRNNCell(RecurrentCell):
         s = '{name}(\n{modstr}\n)'
         return s.format(name=self.__class__.__name__,
                         modstr='\n'.join(['({i}): {m}'.format(i=i, m=_indent(m.__repr__(), 2))
-                                          for i, m in enumerate(self._children)]))
+                                          for i, m in self._children.items()]))
 
     def add(self, cell):
         """Appends a cell into the stack.
 
         Parameters
         ----------
-        cell : rnn cell
+        cell : RecurrentCell
+            The cell to add.
         """
         self.register_child(cell)
 
     def state_info(self, batch_size=0):
-        return _cells_state_info(self._children, batch_size)
+        return _cells_state_info(self._children.values(), batch_size)
 
     def begin_state(self, **kwargs):
         assert not self._modified, \
             "After applying modifier cells (e.g. ZoneoutCell) the base " \
             "cell cannot be called directly. Call the modifier cell instead."
-        return _cells_begin_state(self._children, **kwargs)
+        return _cells_begin_state(self._children.values(), **kwargs)
 
     def __call__(self, inputs, states):
         self._counter += 1
         next_states = []
         p = 0
-        for cell in self._children:
+        for cell in self._children.values():
             assert not isinstance(cell, BidirectionalCell)
             n = len(cell.state_info())
             state = states[p:p+n]
@@ -548,7 +673,8 @@ class SequentialRNNCell(RecurrentCell):
             next_states.append(state)
         return inputs, sum(next_states, [])
 
-    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None):
+    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None,
+               valid_length=None):
         self.reset()
 
         inputs, _, F, batch_size = _format_sequence(length, inputs, layout, None)
@@ -557,18 +683,20 @@ class SequentialRNNCell(RecurrentCell):
 
         p = 0
         next_states = []
-        for i, cell in enumerate(self._children):
+        for i, cell in enumerate(self._children.values()):
             n = len(cell.state_info())
             states = begin_state[p:p+n]
             p += n
-            inputs, states = cell.unroll(length, inputs=inputs, begin_state=states, layout=layout,
-                                         merge_outputs=None if i < num_cells-1 else merge_outputs)
+            inputs, states = cell.unroll(length, inputs=inputs, begin_state=states,
+                                         layout=layout,
+                                         merge_outputs=None if i < num_cells-1 else merge_outputs,
+                                         valid_length=valid_length)
             next_states.extend(states)
 
         return inputs, next_states
 
     def __getitem__(self, i):
-        return self._children[i]
+        return self._children[str(i)]
 
     def __len__(self):
         return len(self._children)
@@ -585,14 +713,26 @@ class DropoutCell(HybridRecurrentCell):
     rate : float
         Percentage of elements to drop out, which
         is 1 - percentage to retain.
+    axes : tuple of int, default ()
+        The axes on which dropout mask is shared. If empty, regular dropout is applied.
+
+
+    Inputs:
+        - **data**: input tensor with shape `(batch_size, size)`.
+        - **states**: a list of recurrent state tensors.
+
+    Outputs:
+        - **out**: output tensor with shape `(batch_size, size)`.
+        - **next_states**: returns input `states` directly.
     """
-    def __init__(self, rate, prefix=None, params=None):
+    def __init__(self, rate, axes=(), prefix=None, params=None):
         super(DropoutCell, self).__init__(prefix, params)
         assert isinstance(rate, numeric_types), "rate must be a number"
-        self.rate = rate
+        self._rate = rate
+        self._axes = axes
 
     def __repr__(self):
-        s = '{name}(rate = {rate})'
+        s = '{name}(rate={_rate}, axes={_axes})'
         return s.format(name=self.__class__.__name__,
                         **self.__dict__)
 
@@ -603,11 +743,13 @@ class DropoutCell(HybridRecurrentCell):
         return 'dropout'
 
     def hybrid_forward(self, F, inputs, states):
-        if self.rate > 0:
-            inputs = F.Dropout(data=inputs, p=self.rate, name='t%d_fwd'%self._counter)
+        if self._rate > 0:
+            inputs = F.Dropout(data=inputs, p=self._rate, axes=self._axes,
+                               name='t%d_fwd'%self._counter)
         return inputs, states
 
-    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None):
+    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None,
+               valid_length=None):
         self.reset()
 
         inputs, _, F, _ = _format_sequence(length, inputs, layout, merge_outputs)
@@ -616,7 +758,7 @@ class DropoutCell(HybridRecurrentCell):
         else:
             return super(DropoutCell, self).unroll(
                 length, inputs, begin_state=begin_state, layout=layout,
-                merge_outputs=merge_outputs)
+                merge_outputs=merge_outputs, valid_length=None)
 
 
 class ModifierCell(HybridRecurrentCell):
@@ -721,17 +863,23 @@ class ResidualCell(ModifierCell):
         output = F.elemwise_add(output, inputs, name='t%d_fwd'%self._counter)
         return output, states
 
-    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None):
+    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None,
+               valid_length=None):
         self.reset()
 
         self.base_cell._modified = False
         outputs, states = self.base_cell.unroll(length, inputs=inputs, begin_state=begin_state,
-                                                layout=layout, merge_outputs=merge_outputs)
+                                                layout=layout, merge_outputs=merge_outputs,
+                                                valid_length=valid_length)
         self.base_cell._modified = True
 
         merge_outputs = isinstance(outputs, tensor_types) if merge_outputs is None else \
                         merge_outputs
-        inputs, _, F, _ = _format_sequence(length, inputs, layout, merge_outputs)
+        inputs, axis, F, _ = _format_sequence(length, inputs, layout, merge_outputs)
+        if valid_length is not None:
+            # mask the padded inputs to zero
+            inputs = _mask_sequence_variable_length(F, inputs, length, valid_length, axis,
+                                                    merge_outputs)
         if merge_outputs:
             outputs = F.elemwise_add(outputs, inputs)
         else:
@@ -752,8 +900,8 @@ class BidirectionalCell(HybridRecurrentCell):
     """
     def __init__(self, l_cell, r_cell, output_prefix='bi_'):
         super(BidirectionalCell, self).__init__(prefix='', params=None)
-        self.register_child(l_cell)
-        self.register_child(r_cell)
+        self.register_child(l_cell, 'l_cell')
+        self.register_child(r_cell, 'r_cell')
         self._output_prefix = output_prefix
 
     def __call__(self, inputs, states):
@@ -762,46 +910,69 @@ class BidirectionalCell(HybridRecurrentCell):
     def __repr__(self):
         s = '{name}(forward={l_cell}, backward={r_cell})'
         return s.format(name=self.__class__.__name__,
-                        l_cell=self._children[0],
-                        r_cell=self._children[1])
+                        l_cell=self._children['l_cell'],
+                        r_cell=self._children['r_cell'])
 
     def state_info(self, batch_size=0):
-        return _cells_state_info(self._children, batch_size)
+        return _cells_state_info(self._children.values(), batch_size)
 
     def begin_state(self, **kwargs):
         assert not self._modified, \
             "After applying modifier cells (e.g. DropoutCell) the base " \
             "cell cannot be called directly. Call the modifier cell instead."
-        return _cells_begin_state(self._children, **kwargs)
+        return _cells_begin_state(self._children.values(), **kwargs)
 
-    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None):
+    def unroll(self, length, inputs, begin_state=None, layout='NTC', merge_outputs=None,
+               valid_length=None):
         self.reset()
 
         inputs, axis, F, batch_size = _format_sequence(length, inputs, layout, False)
+        if valid_length is None:
+            reversed_inputs = list(reversed(inputs))
+        else:
+            reversed_inputs = F.SequenceReverse(F.stack(*inputs, axis=0),
+                                                sequence_length=valid_length,
+                                                use_sequence_length=True)
+            reversed_inputs = _as_list(F.split(reversed_inputs, axis=0, num_outputs=length,
+                                               squeeze_axis=True))
         begin_state = _get_begin_state(self, F, begin_state, inputs, batch_size)
 
         states = begin_state
-        l_cell, r_cell = self._children
+        l_cell, r_cell = self._children.values()
         l_outputs, l_states = l_cell.unroll(length, inputs=inputs,
                                             begin_state=states[:len(l_cell.state_info(batch_size))],
-                                            layout=layout, merge_outputs=merge_outputs)
+                                            layout=layout, merge_outputs=merge_outputs,
+                                            valid_length=valid_length)
         r_outputs, r_states = r_cell.unroll(length,
-                                            inputs=list(reversed(inputs)),
+                                            inputs=reversed_inputs,
                                             begin_state=states[len(l_cell.state_info(batch_size)):],
-                                            layout=layout, merge_outputs=merge_outputs)
-
+                                            layout=layout, merge_outputs=False,
+                                            valid_length=valid_length)
+        if valid_length is None:
+            reversed_r_outputs = list(reversed(r_outputs))
+        else:
+            reversed_r_outputs = F.SequenceReverse(F.stack(*r_outputs, axis=0),
+                                                   sequence_length=valid_length,
+                                                   use_sequence_length=True,
+                                                   axis=0)
+            reversed_r_outputs = _as_list(F.split(reversed_r_outputs, axis=0, num_outputs=length,
+                                                  squeeze_axis=True))
         if merge_outputs is None:
-            merge_outputs = (isinstance(l_outputs, tensor_types)
-                             and isinstance(r_outputs, tensor_types))
+            merge_outputs = isinstance(l_outputs, tensor_types)
             l_outputs, _, _, _ = _format_sequence(None, l_outputs, layout, merge_outputs)
-            r_outputs, _, _, _ = _format_sequence(None, r_outputs, layout, merge_outputs)
+            reversed_r_outputs, _, _, _ = _format_sequence(None, reversed_r_outputs, layout,
+                                                           merge_outputs)
 
         if merge_outputs:
-            r_outputs = F.reverse(r_outputs, axis=axis)
-            outputs = F.concat(l_outputs, r_outputs, dim=2, name='%sout'%self._output_prefix)
+            reversed_r_outputs = F.stack(*reversed_r_outputs, axis=axis)
+            outputs = F.concat(l_outputs, reversed_r_outputs, dim=2,
+                               name='%sout'%self._output_prefix)
+
         else:
             outputs = [F.concat(l_o, r_o, dim=1, name='%st%d'%(self._output_prefix, i))
-                       for i, (l_o, r_o) in enumerate(zip(l_outputs, reversed(r_outputs)))]
-
+                       for i, (l_o, r_o) in enumerate(zip(l_outputs, reversed_r_outputs))]
+        if valid_length is not None:
+            outputs = _mask_sequence_variable_length(F, outputs, length, valid_length, axis,
+                                                     merge_outputs)
         states = l_states + r_states
         return outputs, states

@@ -20,6 +20,8 @@
 """Alexnet, implemented in Gluon."""
 __all__ = ['AlexNet', 'alexnet']
 
+import os
+
 from ....context import cpu
 from ...block import HybridBlock
 from ... import nn
@@ -52,22 +54,21 @@ class AlexNet(HybridBlock):
                                             activation='relu'))
                 self.features.add(nn.MaxPool2D(pool_size=3, strides=2))
                 self.features.add(nn.Flatten())
+                self.features.add(nn.Dense(4096, activation='relu'))
+                self.features.add(nn.Dropout(0.5))
+                self.features.add(nn.Dense(4096, activation='relu'))
+                self.features.add(nn.Dropout(0.5))
 
-            self.classifier = nn.HybridSequential(prefix='')
-            with self.classifier.name_scope():
-                self.classifier.add(nn.Dense(4096, activation='relu'))
-                self.classifier.add(nn.Dropout(0.5))
-                self.classifier.add(nn.Dense(4096, activation='relu'))
-                self.classifier.add(nn.Dropout(0.5))
-                self.classifier.add(nn.Dense(classes))
+            self.output = nn.Dense(classes)
 
     def hybrid_forward(self, F, x):
         x = self.features(x)
-        x = self.classifier(x)
+        x = self.output(x)
         return x
 
 # Constructor
-def alexnet(pretrained=False, ctx=cpu(), root='~/.mxnet/models', **kwargs):
+def alexnet(pretrained=False, ctx=cpu(),
+            root=os.path.join('~', '.mxnet', 'models'), **kwargs):
     r"""AlexNet model from the `"One weird trick..." <https://arxiv.org/abs/1404.5997>`_ paper.
 
     Parameters

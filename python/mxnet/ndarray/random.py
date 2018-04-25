@@ -24,7 +24,7 @@ from .ndarray import NDArray
 
 
 __all__ = ['uniform', 'normal', 'poisson', 'exponential', 'gamma', 'multinomial',
-           'negative_binomial', 'generalized_negative_binomial']
+           'negative_binomial', 'generalized_negative_binomial', 'shuffle']
 
 
 def _random_helper(random, sampler, params, shape, dtype, ctx, out, kwargs):
@@ -83,13 +83,12 @@ def uniform(low=0, high=1, shape=_Null, dtype=_Null, ctx=None, out=None, **kwarg
     >>> mx.nd.random.uniform(0, 1)
     [ 0.54881352]
     <NDArray 1 @cpu(0)
-    >>>> mx.nd.random.uniform(0, 1, ctx=mx.gpu(0))
+    >>> mx.nd.random.uniform(0, 1, ctx=mx.gpu(0))
     [ 0.92514056]
     <NDArray 1 @gpu(0)>
     >>> mx.nd.random.uniform(-1, 1, shape=(2,))
-    [[ 0.71589124  0.08976638]
-     [ 0.69450343 -0.15269041]]
-    <NDArray 2x2 @cpu(0)>
+    [ 0.71589124  0.08976638]
+    <NDArray 2 @cpu(0)>
     >>> low = mx.nd.array([1,2,3])
     >>> high = mx.nd.array([2,3,4])
     >>> mx.nd.random.uniform(low, high, shape=2)
@@ -134,7 +133,7 @@ def normal(loc=0, scale=1, shape=_Null, dtype=_Null, ctx=None, out=None, **kwarg
     >>> mx.nd.random.normal(0, 1)
     [ 2.21220636]
     <NDArray 1 @cpu(0)>
-    >>>> mx.nd.random.normal(0, 1, ctx=mx.gpu(0))
+    >>> mx.nd.random.normal(0, 1, ctx=mx.gpu(0))
     [ 0.29253659]
     <NDArray 1 @gpu(0)>
     >>> mx.nd.random.normal(-1, 1, shape=(2,))
@@ -157,8 +156,6 @@ def poisson(lam=1, shape=_Null, dtype=_Null, ctx=None, out=None, **kwargs):
 
     Samples are distributed according to a Poisson distribution parametrized
     by *lambda* (rate). Samples will always be returned as a floating point data type.
-
-    .. note:: poisson is not implemented for GPU yet.
 
     Parameters
     ----------
@@ -202,12 +199,10 @@ def exponential(scale=1, shape=_Null, dtype=_Null, ctx=None, out=None, **kwargs)
 
     Its probability density function is
 
-        f(x; \frac{1}{\beta}) = \frac{1}{\beta} \exp(-\frac{x}{\beta}),
+    .. math:: f(x; \frac{1}{\beta}) = \frac{1}{\beta} \exp(-\frac{x}{\beta}),
 
     for x > 0 and 0 elsewhere. \beta is the scale parameter, which is the
     inverse of the rate parameter \lambda = 1/\beta.
-
-    .. note:: exponential is not implemented for GPU yet.
 
     Parameters
     ----------
@@ -251,8 +246,6 @@ def gamma(alpha=1, beta=1, shape=_Null, dtype=_Null, ctx=None, out=None, **kwarg
 
     Samples are distributed according to a gamma distribution parametrized
     by *alpha* (shape) and *beta* (scale).
-
-    .. note:: gamma is not implemented for GPU yet.
 
     Parameters
     ----------
@@ -304,8 +297,6 @@ def negative_binomial(k=1, p=1, shape=_Null, dtype=_Null, ctx=None,
     probability in each experiment). Samples will always be returned as a
     floating point data type.
 
-    .. note:: negative_binomial is not implemented for GPU yet.
-
     Parameters
     ----------
     k : float or NDArray
@@ -356,8 +347,6 @@ def generalized_negative_binomial(mu=1, alpha=1, shape=_Null, dtype=_Null, ctx=N
     *alpha* is defined as *1/k* where *k* is the failure limit of the
     number of unsuccessful experiments (generalized to real numbers).
     Samples will always be returned as a floating point data type.
-
-    .. note:: negative_binomial is not implemented for GPU yet.
 
     Parameters
     ----------
@@ -441,3 +430,35 @@ def multinomial(data, shape=_Null, get_prob=False, out=None, **kwargs):
     <NDArray 2 @cpu(0)>
     """
     return _internal._sample_multinomial(data, shape, get_prob, out=out, **kwargs)
+
+
+def shuffle(data, **kwargs):
+    """Shuffle the elements randomly.
+
+    This shuffles the array along the first axis.
+    The order of the elements in each subarray does not change.
+    For example, if a 2D array is given, the order of the rows randomly changes,
+    but the order of the elements in each row does not change.
+
+    Parameters
+    ----------
+    data : NDArray
+        Input data array.
+    out : NDArray
+        Array to store the result.
+
+    Examples
+    --------
+    >>> data = mx.nd.array([[0, 1, 2], [3, 4, 5], [6, 7, 8]])
+    >>> mx.nd.random.shuffle(data)
+    [[ 0.  1.  2.]
+     [ 6.  7.  8.]
+     [ 3.  4.  5.]]
+    <NDArray 2x3 @cpu(0)>
+    >>> mx.nd.random.shuffle(data)
+    [[ 3.  4.  5.]
+     [ 0.  1.  2.]
+     [ 6.  7.  8.]]
+    <NDArray 2x3 @cpu(0)>
+    """
+    return _internal._shuffle(data, **kwargs)

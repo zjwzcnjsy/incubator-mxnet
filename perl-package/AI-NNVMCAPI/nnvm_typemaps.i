@@ -1,27 +1,45 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 %typemap(in) (const char** in), (char** in)
 {
     AV *tempav;
     I32 len;
     int i;
     SV  **tv;
-    STRLEN len2;
     if (!SvROK($input))
         croak("Argument $argnum is not a reference.");
         if (SvTYPE(SvRV($input)) != SVt_PVAV)
         croak("Argument $argnum is not an array.");
         tempav = (AV*)SvRV($input);
-    len = av_top_index(tempav) + 1;
+    len = av_len(tempav) + 1;
     if(len!=0) 
     {
         $1 = (char **) safemalloc((len)*sizeof(char *));
         for (i = 0; i < len; i++) {
-            tv = av_fetch(tempav, i, 0);    
-            $1[i] = (char *) SvPV(*tv,len2);
+            tv = av_fetch(tempav, i, 0);
+            $1[i] = (char *) SvPV_nolen(*tv);
         }
     }
     else
     {
-       $1 = NULL;     
+       $1 = NULL;
     }
 }
 %typemap(freearg) (const char** in), (char** in)  {
@@ -34,7 +52,6 @@
     char *key;
     SV *val;
     I32 len;
-    STRLEN len2;
     int hash_len;
     int i = 0;
     if (!SvROK($input))
@@ -50,7 +67,7 @@
         while ((val = hv_iternextsv(temphv, &key, &len))) 
         {
             $1[i] = key;
-            $2[i] = SvPV(val, len2);
+            $2[i] = SvPV_nolen(val);
             ++i;
         }
     }
@@ -156,7 +173,7 @@
         if (SvTYPE(SvRV($input)) != SVt_PVAV)
         croak("Argument $argnum is not an array.");
         tempav = (AV*)SvRV($input);
-    len = av_top_index(tempav) + 1;
+    len = av_len(tempav) + 1;
     if(len)
     {
         $1 = ($1_type)safemalloc(len*sizeof($*1_type));

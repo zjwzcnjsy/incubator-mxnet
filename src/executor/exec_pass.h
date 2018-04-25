@@ -18,6 +18,7 @@
  */
 
 /*!
+ * Copyright (c) 2016 by Contributors
  * \file exec_pass.h
  * \brief All the execution related pass and data structures.
  */
@@ -94,6 +95,12 @@ using OpExecVector = std::vector<std::shared_ptr<OpExecutor> >;
  * \node stored under "context"
  */
 using ContextVector = std::vector<Context>;
+
+/*!
+ * \brief per node device mask vector
+ * \node stored under "dev_mask"
+ */
+using DevMaskVector = std::vector<int>;
 
 /*!
  * \brief Attach OpExecutor to the graph attributes.

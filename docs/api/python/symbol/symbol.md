@@ -91,6 +91,75 @@ Composite multiple symbols into a new one by an operator.
     Symbol.__pow__
 ```
 
+#### Trigonometric functions
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    Symbol.sin
+    Symbol.cos
+    Symbol.tan
+    Symbol.arcsin
+    Symbol.arccos
+    Symbol.arctan
+    Symbol.degrees
+    Symbol.radians
+```
+
+#### Hyperbolic functions
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    Symbol.sinh
+    Symbol.cosh
+    Symbol.tanh
+    Symbol.arcsinh
+    Symbol.arccosh
+    Symbol.arctanh
+```
+
+#### Exponents and logarithms
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    Symbol.exp
+    Symbol.expm1
+    Symbol.log
+    Symbol.log10
+    Symbol.log2
+    Symbol.log1p
+```
+
+#### Powers
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    Symbol.sqrt
+    Symbol.rsqrt
+    Symbol.cbrt
+    Symbol.rcbrt
+    Symbol.square
+```
+
+## Basic neural network functions
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    Symbol.relu
+    Symbol.sigmoid
+    Symbol.softmax
+    Symbol.log_softmax
+```
+
 #### Comparison operators
 
 ```eval_rst
@@ -123,6 +192,7 @@ Composite multiple symbols into a new one by an operator.
 
     Symbol.astype
     Symbol.reshape
+    Symbol.reshape_like
     Symbol.flatten
     Symbol.expand_dims
 ```
@@ -191,6 +261,7 @@ Composite multiple symbols into a new one by an operator.
     Symbol.topk
     Symbol.argmax
     Symbol.argmin
+    Symbol.argmax_channel
 ```
 
 ### Query information
@@ -216,6 +287,7 @@ Composite multiple symbols into a new one by an operator.
 
     Symbol.slice
     Symbol.slice_axis
+    Symbol.slice_like
     Symbol.take
     Symbol.one_hot
     Symbol.pick
@@ -300,6 +372,7 @@ Composite multiple symbols into a new one by an operator.
 
     cast
     reshape
+    reshape_like
     flatten
     expand_dims
 ```
@@ -336,6 +409,7 @@ Composite multiple symbols into a new one by an operator.
 
     concat
     split
+    stack
 ```
 
 ### Indexing routines
@@ -346,11 +420,14 @@ Composite multiple symbols into a new one by an operator.
 
     slice
     slice_axis
+    slice_like
     take
     batch_take
     one_hot
     pick
     where
+    gather_nd
+    scatter_nd
 ```
 
 ## Mathematical functions
@@ -367,7 +444,6 @@ Composite multiple symbols into a new one by an operator.
     broadcast_div
     broadcast_mod
     negative
-    reciprocal
     dot
     batch_dot
     add_n
@@ -435,7 +511,6 @@ Composite multiple symbols into a new one by an operator.
     trunc
 ```
 
-
 ### Exponents and logarithms
 
 ```eval_rst
@@ -462,9 +537,10 @@ Composite multiple symbols into a new one by an operator.
     cbrt
     rcbrt
     square
+    reciprocal
 ```
 
-### Logic functions
+### Comparison
 
 ```eval_rst
 .. autosummary::
@@ -477,19 +553,22 @@ Composite multiple symbols into a new one by an operator.
     broadcast_lesser
     broadcast_lesser_equal
 ```
+
 ### Random sampling
 
 ```eval_rst
 .. autosummary::
     :nosignatures:
 
-    sample_uniform
-    sample_normal
-    sample_gamma
-    sample_exponential
-    sample_poisson
-    sample_negative_binomial
-    sample_generalized_negative_binomial
+    mxnet.symbol.random.uniform
+    mxnet.symbol.random.normal
+    mxnet.symbol.random.gamma
+    mxnet.symbol.random.exponential
+    mxnet.symbol.random.poisson
+    mxnet.symbol.random.negative_binomial
+    mxnet.symbol.random.generalized_negative_binomial
+    mxnet.symbol.random.multinomial
+    mxnet.symbol.random.shuffle
     mxnet.random.seed
 ```
 
@@ -504,6 +583,17 @@ Composite multiple symbols into a new one by an operator.
     argsort
     argmax
     argmin
+```
+
+### Sequence operation
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    SequenceLast
+    SequenceMask
+    SequenceReverse
 ```
 
 ### Miscellaneous
@@ -539,6 +629,8 @@ Composite multiple symbols into a new one by an operator.
     SoftmaxOutput
     softmax
     log_softmax
+    relu
+    sigmoid
 ```
 
 ### More
@@ -553,6 +645,7 @@ Composite multiple symbols into a new one by an operator.
     Embedding
     LeakyReLU
     InstanceNorm
+    LayerNorm
     L2Normalization
     LRN
     ROIPooling
